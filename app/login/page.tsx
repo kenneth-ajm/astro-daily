@@ -57,9 +57,10 @@ export default function LoginPage() {
       }
 
       router.push("/app");
-    } catch (e: any) {
-      setError(e?.message ?? "Unexpected error");
-    } finally {
+   } catch (e: unknown) {
+  const message = e instanceof Error ? e.message : "Unexpected error";
+  setError(message);
+} finally {
       setLoading(false);
     }
   }
