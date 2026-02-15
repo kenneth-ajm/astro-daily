@@ -4,6 +4,26 @@ import { createServerClient } from "@supabase/ssr";
 import OpenAI from "openai";
 import { env } from "@/lib/env";
 
+type CookieToSet = {
+  name: string;
+  value: string;
+  options?: Parameters<ReturnType<typeof cookies>["set"]>[2];
+};
+
+type StructuredReading = {
+  headline: string;
+  mood_score: number; // 0-100
+  themes: string[];
+  do: string;
+  avoid: string;
+  lucky: { color: string; number: number; time_window: string };
+  blueprint: string[];
+  chinese_zodiac: { animal: string; traits: string[]; today_tip: string };
+  transits_today: string[];
+  reflection_question: string;
+  affirmation: string;
+};
+
 export async function POST() {
   try {
     const cookieStore = cookies();
@@ -13,7 +33,7 @@ export async function POST() {
         getAll() {
           return cookieStore.getAll();
         },
-        setAll(cookiesToSet: any[]) {
+        setAll(cookiesToSet: CookieToSet[]) {
           cookiesToSet.forEach(({ name, value, options }) => {
             cookieStore.set(name, value, options);
           });
@@ -31,23 +51,20 @@ export async function POST() {
 
     const today = new Date().toISOString().slice(0, 10);
 
-    const openai = new OpenAI({
-      apiKey: env.openAiApiKey,
-    });
+    const openai = new OpenAI({ apiKey: env.openAiApiKey });
 
-    const response = await openai.chat.completions.create({
+    const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "You are a modern astrologer. Return ONLY valid JSON. No markdown. No explanations.",
+            "You are a modern astrologer + practical coach. Return ONLY valid JSON. No markdown. No headings. No filler. Avoid clichés like 'celestial energies'. Be specific and contemporary.",
         },
         {
           role: "user",
-          content: `
-Return JSON with this structure:
+          content: `Return STRICT JSON that matches this schema exactly:
 
 {
   "headline": string,
@@ -62,15 +79,36 @@ Return JSON with this structure:
   "reflection_question": string,
   "affirmation": string
 }
-`,
+
+Rules:
+- mood_score: integer 0-100
+- themes: 3-5 short labels (1-2 words each)
+- blueprint: exactly 4 bullets, each <= 12 words
+- transits_today: exactly 3 bullets, each <= 12 words
+- do/avoid: single sentence each, concrete action
+- lucky.time_window: like "3–5pm"
+- Keep it helpful, not mystical.`,
         },
       ],
     });
 
-    const readingJson = JSON.parse(response.choices[0].message.content || "{}");
+    const raw = completion.choices[0]?.message?.content ?? "{}";
 
-    const summary = `${readingJson.headline}\n\nDo: ${readingJson.do}`;
+    let readingJson: StructuredReading;
+    try {
+      readingJson = JSON.parse(raw) as StructuredReading;
+    } catch {
+      return NextResponse.json(
+        { error: "Model returned invalid JSON" },
+        { status: 500 }
+      );
+    }
 
+    const headline = readingJson.headline ?? "Your day, in one line.";
+    const doText = readingJson.do ?? "";
+    const summary = `${headline}\nDo: ${doText}`;
+
+    // Overwrite today's reading if it already exists
     await supabase.from("readings").upsert(
       {
         user_id: user.id,
@@ -85,10 +123,8 @@ Return JSON with this structure:
       reading_json: readingJson,
       reading_text: summary,
     });
-  } catch (error: any) {
-    return NextResponse.json(
-      { error: error.message || "Generation failed" },
-      { status: 500 }
-    );
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Generation failed";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
