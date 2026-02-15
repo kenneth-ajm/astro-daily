@@ -1,72 +1,94 @@
-import OpenAI from "openai";
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase-server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+import OpenAI from "openai";
 import { env } from "@/lib/env";
 
 export async function POST() {
   try {
-    if (!env.openAiApiKey) {
-      return NextResponse.json({ error: "OPENAI_API_KEY is not configured." }, { status: 500 });
-    }
+    const cookieStore = cookies();
 
-    const supabase = createClient();
+    const supabase = createServerClient(env.supabaseUrl, env.supabaseAnonKey, {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet: any[]) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            cookieStore.set(name, value, options);
+          });
+        },
+      },
+    });
+
     const {
-      data: { user }
+      data: { user },
     } = await supabase.auth.getUser();
 
     if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("dob,tob,place,timezone")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    const today = new Date().toISOString().slice(0, 10);
 
-    if (!profile) {
-      return NextResponse.json({ error: "Please save your birth profile first." }, { status: 400 });
-    }
+    const openai = new OpenAI({
+      apiKey: env.openAiApiKey,
+    });
 
-    const openai = new OpenAI({ apiKey: env.openAiApiKey });
-
-    const completion = await openai.chat.completions.create({
+    const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "You are an astrology guide. Return a daily reading under 180 words in plain text with exactly three sections titled: Insight, Action, Reflection Question."
+            "You are a modern astrologer. Return ONLY valid JSON. No markdown. No explanations.",
         },
         {
           role: "user",
-          content: `Birth details:\n- Date: ${profile.dob}\n- Time: ${profile.tob}\n- Place: ${profile.place}\n- Timezone: ${profile.timezone}\nGenerate today's reading.`
-        }
+          content: `
+Return JSON with this structure:
+
+{
+  "headline": string,
+  "mood_score": number,
+  "themes": string[],
+  "do": string,
+  "avoid": string,
+  "lucky": { "color": string, "number": number, "time_window": string },
+  "blueprint": string[],
+  "chinese_zodiac": { "animal": string, "traits": string[], "today_tip": string },
+  "transits_today": string[],
+  "reflection_question": string,
+  "affirmation": string
+}
+`,
+        },
       ],
-      temperature: 0.8,
-      max_tokens: 240
     });
 
-    const reading = completion.choices[0]?.message?.content?.trim();
+    const readingJson = JSON.parse(response.choices[0].message.content || "{}");
 
-    if (!reading) {
-      return NextResponse.json({ error: "OpenAI returned an empty reading." }, { status: 500 });
-    }
+    const summary = `${readingJson.headline}\n\nDo: ${readingJson.do}`;
 
-    const { error: insertError } = await supabase.from("readings").insert({
-      user_id: user.id,
-      content: reading
+    await supabase.from("readings").upsert(
+      {
+        user_id: user.id,
+        reading_date: today,
+        content: summary,
+        content_json: readingJson,
+      },
+      { onConflict: "user_id,reading_date" }
+    );
+
+    return NextResponse.json({
+      reading_json: readingJson,
+      reading_text: summary,
     });
-
-    if (insertError) {
-      return NextResponse.json({ error: insertError.message }, { status: 500 });
-    }
-
-    return NextResponse.json({ reading });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown server error";
-    return NextResponse.json({ error: message }, { status: 500 });
+  } catch (error: any) {
+    return NextResponse.json(
+      { error: error.message || "Generation failed" },
+      { status: 500 }
+    );
   }
 }
