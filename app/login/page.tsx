@@ -1,74 +1,111 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase-client";
 
 export default function LoginPage() {
   const router = useRouter();
-  const supabase = createClient();
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setLoading(true);
+  async function handleSignup() {
     setError(null);
+    setLoading(true);
 
-    const action = mode === "signin" ? supabase.auth.signInWithPassword : supabase.auth.signUp;
-    const { error: authError } = await action({ email, password });
+    try {
+      const res = await fetch("/api/auth/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
 
-    setLoading(false);
+      const data = await res.json();
 
-    if (authError) {
-      setError(authError.message);
-      return;
+      if (!res.ok) {
+        setError(data.error || "Signup failed");
+        return;
+      }
+
+      router.push("/app");
+    } catch (e: any) {
+      setError(e?.message ?? "Unexpected error");
+    } finally {
+      setLoading(false);
     }
+  }
 
-    router.push("/app");
-    router.refresh();
-  };
+  async function handleSignin() {
+    setError(null);
+    setLoading(true);
+
+    try {
+      const res = await fetch("/api/auth/signin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error || "Signin failed");
+        return;
+      }
+
+      router.push("/app");
+    } catch (e: any) {
+      setError(e?.message ?? "Unexpected error");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
-    <section className="mx-auto max-w-md rounded-xl border border-slate-800 bg-slate-900 p-6">
-      <h1 className="mb-2 text-2xl font-semibold">{mode === "signin" ? "Sign in" : "Create account"}</h1>
-      <p className="mb-6 text-sm text-slate-300">Use your email and password to access your readings.</p>
-      <form onSubmit={handleSubmit} className="space-y-4">
+    <div className="min-h-screen flex items-center justify-center bg-[#0b1220] text-white">
+      <div className="bg-[#111a2e] p-8 rounded-xl w-full max-w-md shadow-lg">
+        <h1 className="text-2xl font-bold mb-4">Create account</h1>
+
         <input
+          className="w-full mb-3 p-2 rounded bg-[#0f172a] border border-gray-600"
           type="email"
-          required
           placeholder="Email"
-          className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
         />
+
         <input
+          className="w-full mb-4 p-2 rounded bg-[#0f172a] border border-gray-600"
           type="password"
-          required
-          minLength={6}
           placeholder="Password"
-          className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
-        {error ? <p className="text-sm text-rose-300">{error}</p> : null}
+
+        {error && (
+          <div className="mb-3 text-red-400 text-sm">
+            {error}
+          </div>
+        )}
+
         <button
-          className="w-full rounded bg-violet-600 px-4 py-2 font-medium hover:bg-violet-500 disabled:opacity-60"
+          onClick={handleSignup}
           disabled={loading}
+          className="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded mb-2"
         >
-          {loading ? "Please wait..." : mode === "signin" ? "Sign in" : "Sign up"}
+          {loading ? "Please wait..." : "Sign Up"}
         </button>
-      </form>
-      <button
-        type="button"
-        className="mt-4 text-sm text-violet-300 underline"
-        onClick={() => setMode(mode === "signin" ? "signup" : "signin")}
-      >
-        {mode === "signin" ? "Need an account? Sign up" : "Already have an account? Sign in"}
-      </button>
-    </section>
+
+        <button
+          onClick={handleSignin}
+          disabled={loading}
+          className="w-full bg-gray-700 hover:bg-gray-800 py-2 rounded"
+        >
+          {loading ? "Please wait..." : "Sign In"}
+        </button>
+      </div>
+    </div>
   );
 }
