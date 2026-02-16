@@ -153,4 +153,4 @@ export async function POST() {
 
     const animal = chineseZodiacAnimal(birthYear);
     const elem = chineseYearElement(birthYear
-::contentReference[oaicite:0]{index=0}
+
