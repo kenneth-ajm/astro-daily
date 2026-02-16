@@ -21,7 +21,7 @@ type Facts = {
   western: {
     sun_sign: string;
     moon_sign: string;
-    rising_sign: string | null; // only when lat/lon available (future)
+    rising_sign: string | null;
   };
   chinese: {
     animal: string;
@@ -57,7 +57,9 @@ function normalizeReading(rawObj: unknown, facts: Facts): StructuredReading {
   const obj = (rawObj ?? {}) as Partial<StructuredReading>;
 
   const mood = Number(obj.mood_score);
-  const mood_score = Number.isFinite(mood) ? Math.max(0, Math.min(100, Math.round(mood))) : 60;
+  const mood_score = Number.isFinite(mood)
+    ? Math.max(0, Math.min(100, Math.round(mood)))
+    : 60;
 
   const themes = Array.isArray(obj.themes) ? obj.themes.map(String).slice(0, 6) : [];
 
@@ -78,14 +80,13 @@ function normalizeReading(rawObj: unknown, facts: Facts): StructuredReading {
 
   const cz = (obj.chinese_zodiac ?? {}) as Partial<StructuredReading["chinese_zodiac"]>;
   const chinese_zodiac = {
-    // Deterministic override: always use calculated animal
-    animal: facts.chinese.animal,
+    animal: facts.chinese.animal, // deterministic
     traits: Array.isArray(cz.traits) ? cz.traits.map(String).filter(Boolean).slice(0, 5) : [],
     today_tip: String(cz.today_tip ?? ""),
   };
 
   return {
-    facts, // deterministic facts
+    facts,
     headline: String(obj.headline ?? "Today’s focus"),
     mood_score,
     themes,
@@ -124,7 +125,6 @@ export async function POST() {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    // Pull latest profile for this user
     const { data: profile, error: profileErr } = await supabase
       .from("profiles")
       .select("dob,tob,place,timezone,birth_lat,birth_lon")
@@ -136,13 +136,10 @@ export async function POST() {
     }
 
     if (!profile?.dob || !profile?.tob || !profile?.timezone || !profile?.place) {
-      return NextResponse.json(
-        { error: "Save your birth profile first." },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Save your birth profile first." }, { status: 400 });
     }
 
-    // Compute deterministic facts
+    // Deterministic facts
     const utcBirth = toUtcDate(profile.dob, profile.tob, profile.timezone);
     const birthYear = new Date(profile.dob).getFullYear();
     const birthMonth = new Date(profile.dob).getMonth() + 1;
@@ -152,5 +149,112 @@ export async function POST() {
     const moon = westernMoonSign(utcBirth);
 
     const animal = chineseZodiacAnimal(birthYear);
-    const elem = chineseYearElement(birthYear
+    const elem = chineseYearElement(birthYear);
 
+    const rising: string | null =
+      typeof profile.birth_lat === "number" && typeof profile.birth_lon === "number"
+        ? null
+        : null;
+
+    const facts: Facts = {
+      western: {
+        sun_sign: sun,
+        moon_sign: moon,
+        rising_sign: rising,
+      },
+      chinese: {
+        animal,
+        element: elem.element,
+        yin_yang: elem.yinYang,
+      },
+      birth: {
+        dob: profile.dob,
+        tob: profile.tob,
+        timezone: profile.timezone,
+        place: profile.place,
+        birth_lat: profile.birth_lat ?? null,
+        birth_lon: profile.birth_lon ?? null,
+      },
+    };
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    const openai = new OpenAI({ apiKey: env.openAiApiKey });
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a modern astrologer + practical coach. Return ONLY valid JSON. Do not change provided facts. Avoid clichés like 'celestial energies'.",
+        },
+        {
+          role: "user",
+          content: `
+FACTS (DO NOT CHANGE THESE):
+${JSON.stringify(facts)}
+
+Return STRICT JSON matching this schema:
+
+{
+  "facts": <exact same facts object above>,
+  "headline": string,
+  "mood_score": number (0-100),
+  "themes": string[],
+  "do": string,
+  "avoid": string,
+  "lucky": { "color": string, "number": number, "time_window": string },
+  "blueprint": string[],
+  "chinese_zodiac": { "animal": "${facts.chinese.animal}", "traits": string[], "today_tip": string },
+  "transits_today": string[],
+  "reflection_question": string,
+  "affirmation": string
+}
+
+Rules:
+- mood_score: integer 0-100
+- themes: 3-5 short labels
+- blueprint: exactly 4 bullets, <= 12 words each
+- transits_today: exactly 3 bullets, <= 12 words each
+- chinese_zodiac.animal MUST be "${facts.chinese.animal}"
+- JSON only.
+`,
+        },
+      ],
+    });
+
+    const raw = completion.choices[0]?.message?.content ?? "{}";
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = {};
+    }
+
+    const readingJson = normalizeReading(parsed, facts);
+
+    const summary = `${readingJson.headline}\nDo: ${readingJson.do}`;
+
+    await supabase.from("readings").upsert(
+      {
+        user_id: user.id,
+        reading_date: today,
+        content: summary,
+        content_json: readingJson,
+        facts_json: facts,
+      },
+      { onConflict: "user_id,reading_date" }
+    );
+
+    return NextResponse.json({
+      reading_json: readingJson,
+      reading_text: summary,
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Generation failed";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
